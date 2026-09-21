@@ -1,0 +1,5 @@
+# 复制为 signing.properties 后在本机填写，切勿提交真实密码或密钥文件。
+storeFile=platform.jks
+storePassword=YOUR_STORE_PASSWORD
+keyAlias=YOUR_KEY_ALIAS
+keyPassword=YOUR_KEY_PASSWORD

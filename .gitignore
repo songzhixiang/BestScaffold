@@ -1,0 +1,13 @@
+/.gradle/
+/.kotlin/
+/.idea/
+*.iml
+**/build/
+
+# 本机 SDK 路径及签名信息
+/local.properties
+/signing.properties
+*.jks
+*.keystore
+*.p12
+
