@@ -44,6 +44,9 @@ android {
         }
         debug {
             minifyEnabled false
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

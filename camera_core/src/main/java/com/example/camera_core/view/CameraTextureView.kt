@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.SurfaceTexture
 import android.media.Image
 import android.util.AttributeSet
+import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import com.example.camera_core.api.ICamera
@@ -266,8 +267,10 @@ class CameraTextureView @JvmOverloads constructor(
             openedSurface = surface
             openInFlight = true
             camera.openCamera(surface)
+            Log.d("szx", "openCamera $camera")
         } else if (!openInFlight && !camera.isPreviewOn()) {
             camera.resumeCamera()
+            Log.d("szx", "resumeCamera $camera")
         }
     }
 

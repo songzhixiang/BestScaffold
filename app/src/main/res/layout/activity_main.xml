@@ -19,8 +19,5 @@
         android:layout_marginTop="16dp"
         android:text="Action" />
 
-    <com.example.camera_core.view.CameraSurfaceView
-        android:id="@+id/camera_surfaceview"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"/>
+
 </LinearLayout>

@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.Size
 import android.widget.Toast
+import com.example.bestscaffold.App
 import com.example.bestscaffold.R
 import com.example.bestscaffold.databinding.ActivityMainBinding
 import com.example.bestscaffold.ui.base.BaseActivity
@@ -15,12 +16,19 @@ import com.example.camera_core.api.Camera2API
 import com.example.camera_core.api.CameraInventory
 import com.example.camera_core.api.ICameraOpenCallback
 import com.example.camera_core.api.ICameraPreviewDataCallback
+import com.example.camera_core.view.CameraOesEngine
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : BaseActivity<ActivityMainBinding>() {
+
+    private val cameraId = "103" //103 倒车，101 DMS
+    private var cameraOesEngine: CameraOesEngine? = null
+    private val oesErrorListener = CameraOesEngine.ErrorListener { message, cause ->
+        Log.e(TAG, message, cause)
+    }
 
     private val viewModel: MainViewModel by lazy {
         ViewModelProvider(this)[MainViewModel::class.java]
@@ -70,11 +78,11 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
             frameCount.set(0)
             validFrameCount.set(0)
             lastFrameErrorLogTime.set(0)
-            Log.i(TAG, "摄像头 101 打开成功，开始预览")
+            Log.i(TAG, "摄像头 $cameraId 打开成功，开始预览")
         }
 
         override fun onPreview(previewWidth: Int, previewHeight: Int) {
-            Log.i(TAG, "摄像头 101 实际预览尺寸=${previewWidth}x${previewHeight}")
+            Log.i(TAG, "摄像头 $cameraId 实际预览尺寸=${previewWidth}x${previewHeight}")
         }
     }
 
@@ -97,14 +105,14 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
             if (now - previous >= FRAME_ERROR_LOG_INTERVAL_MS &&
                 lastFrameErrorLogTime.compareAndSet(previous, now)
             ) {
-                Log.e(TAG, "摄像头 101 连续收到无效预览帧，当前总帧数=${frameCount.get()}")
+                Log.e(TAG, "摄像头 $cameraId 连续收到无效预览帧，当前总帧数=${frameCount.get()}")
             }
         }
 
         override fun onFrameSuccessCallback() {
             val count = validFrameCount.incrementAndGet()
             if (count == 1L || count % FRAME_LOG_INTERVAL == 0L) {
-                Log.d(TAG, "摄像头 101 已收到有效帧 $count 帧")
+                Log.d(TAG, "摄像头 $cameraId 已收到有效帧 $count 帧")
             }
         }
     }
@@ -123,21 +131,41 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
         binding.btnAction.setOnClickListener {
             viewModel.handleEvent(MainEvent.OnButtonClick)
         }
+
+//        if (binding.cameraSurfaceview.camera == null) {
+//            binding.cameraSurfaceview.setCameraOpenCallback(callback)
+//            binding.cameraSurfaceview.setCameraPreviewDataCallback(previewCallback)
+//            binding.cameraSurfaceview.setCamera(Camera2API(this, cameraId),false)
+//        }
+
+        cameraOesEngine = (application as App).getOrStartCameraEngine(cameraId).also { engine ->
+            engine.setErrorListener(oesErrorListener)
+        }
     }
 
     override fun onStart() {
         super.onStart()
-        if (binding.cameraSurfaceview.camera == null) {
-            binding.cameraSurfaceview.setCameraOpenCallback(callback)
-            binding.cameraSurfaceview.setCameraPreviewDataCallback(previewCallback)
-            binding.cameraSurfaceview.setCamera(Camera2API(this, "103")) //103 倒车，101 DMS
-        }
+        cameraOesEngine?.setErrorListener(oesErrorListener)
     }
 
     override fun onStop() {
-        // 正常进入后台时主动关闭设备；强制结束进程时系统不会调用此方法。
-        binding.cameraSurfaceview.releaseCamera()
+        cameraOesEngine?.clearErrorListener(oesErrorListener)
+        // 页面退到后台只解除 UI 监听，不暂停进程级摄像头采集。
+//        binding.cameraSurfaceview.pausePreview()
         super.onStop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+//        if (binding.cameraSurfaceview.camera != null) {
+//            binding.cameraSurfaceview.startPreview()
+//        }
+    }
+
+    override fun onDestroy() {
+        cameraOesEngine?.clearErrorListener(oesErrorListener)
+        cameraOesEngine = null
+        super.onDestroy()
     }
 
     override fun observeState() {

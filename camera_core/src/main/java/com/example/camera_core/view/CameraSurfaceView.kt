@@ -3,6 +3,7 @@ package com.example.camera_core.view
 import android.content.Context
 import android.media.Image
 import android.util.AttributeSet
+import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
