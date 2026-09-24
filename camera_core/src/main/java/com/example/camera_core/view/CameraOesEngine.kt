@@ -8,6 +8,7 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.opengl.EGL14
 import android.opengl.EGLConfig
+import android.opengl.EGLExt
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.os.Handler
@@ -68,6 +69,8 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
     private var pbufferSurface = EGL14.EGL_NO_SURFACE
     private var previewEglSurface = EGL14.EGL_NO_SURFACE
     private var previewSourceSurface: Surface? = null
+    private var encoderEglSurface = EGL14.EGL_NO_SURFACE
+    private var encoderSourceSurface: Surface? = null
     private var eglConfig: EGLConfig? = null
     private var oesTextureId = 0
     private var surfaceTexture: SurfaceTexture? = null
@@ -76,6 +79,12 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
     private val transformMatrix = FloatArray(16)
     private var surfaceWidth = 0
     private var surfaceHeight = 0
+    private var encoderWidth = 0
+    private var encoderHeight = 0
+    private var encoderOutputEnabled = false
+    private var encoderResumePending = false
+    private var lastEncoderSourceTimestampNs = -1L
+    private var encoderPresentationTimeNs = 0L
     private var frameCount = 0L
 
     fun setErrorListener(listener: ErrorListener?) {
@@ -169,6 +178,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         val configAttribs = intArrayOf(
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
@@ -411,6 +421,94 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         }
     }
 
+    /**
+     * 挂载 MediaCodec 的输入 Surface。相机帧会在同一 GL 线程直接绘制到该 Surface，
+     * 不会经过中间 FBO，也不会影响预览 Surface 的生命周期。
+     */
+    fun attachEncoderSurface(
+        surface: Surface,
+        width: Int,
+        height: Int,
+        onComplete: ((Throwable?) -> Unit)? = null,
+    ) {
+        require(width > 0 && height > 0) { "编码画面宽高必须大于 0" }
+        if (released.get()) {
+            onComplete?.invoke(IllegalStateException("相机引擎已经释放"))
+            return
+        }
+        val posted = glHandler.post {
+            var result: Throwable? = null
+            try {
+                check(!released.get()) { "相机引擎已经释放" }
+                check(surface.isValid) { "编码器输入 Surface 已失效" }
+                destroyEncoderSurface()
+                val config = checkNotNull(eglConfig) { "EGL 尚未初始化" }
+                val windowSurface = EGL14.eglCreateWindowSurface(
+                    eglDisplay,
+                    config,
+                    surface,
+                    intArrayOf(EGL14.EGL_NONE),
+                    0,
+                )
+                checkEgl(windowSurface != EGL14.EGL_NO_SURFACE, "eglCreateWindowSurface(编码器)")
+                encoderEglSurface = windowSurface
+                encoderSourceSurface = surface
+                encoderWidth = width
+                encoderHeight = height
+                encoderOutputEnabled = true
+                resetEncoderTimestamps()
+                Log.i(TAG, "编码器窗口已挂载：$width x $height")
+            } catch (error: Throwable) {
+                destroyEncoderSurface()
+                result = error
+                reportError("挂载编码器输入 Surface 失败", error)
+            }
+            onComplete?.let { callback -> mainHandler.post { callback(result) } }
+        }
+        if (!posted) {
+            onComplete?.invoke(IllegalStateException("GL 线程已停止"))
+        }
+    }
+
+    /** 停止向编码器输出，并在 GL 线程完成最后一次绘制后卸载指定 Surface。 */
+    fun detachEncoderSurface(
+        surface: Surface,
+        onDetached: (() -> Unit)? = null,
+    ) {
+        if (released.get()) {
+            onDetached?.invoke()
+            return
+        }
+        val posted = glHandler.post {
+            if (encoderSourceSurface === surface) destroyEncoderSurface()
+            onDetached?.let { callback -> mainHandler.post(callback) }
+        }
+        if (!posted) onDetached?.invoke()
+    }
+
+    /** 只暂停编码输出；相机采集、OES 更新和屏幕预览保持运行。 */
+    fun pauseEncoderOutput(surface: Surface) {
+        if (released.get()) return
+        glHandler.post {
+            if (encoderSourceSurface === surface) {
+                encoderOutputEnabled = false
+                Log.i(TAG, "编码画面输出已暂停")
+            }
+        }
+    }
+
+    /** 恢复编码输出，并从成片时间线上移除暂停期间的间隔。 */
+    fun resumeEncoderOutput(surface: Surface) {
+        if (released.get()) return
+        glHandler.post {
+            if (encoderSourceSurface === surface && encoderEglSurface != EGL14.EGL_NO_SURFACE) {
+                encoderResumePending = true
+                encoderOutputEnabled = true
+                Log.i(TAG, "编码画面输出已恢复")
+            }
+        }
+    }
+
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
         if (released.get() || surfaceTexture == null || surfaceTexture !== this.surfaceTexture) return
         try {
@@ -425,6 +523,8 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
                     reportError("处理相机帧回调失败", error)
                 }
             }
+
+            renderEncoderFrame(surfaceTexture.timestamp)
 
             if (previewEglSurface != EGL14.EGL_NO_SURFACE &&
                 surfaceWidth > 0 && surfaceHeight > 0
@@ -480,6 +580,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
     private fun beginRelease() {
         sessionGeneration++
         closeCaptureSession()
+        destroyEncoderSurface()
         cameraDevice?.let { device ->
             if (!cameraClosing) closeCameraDevice(device)
         }
@@ -591,6 +692,89 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         previewSourceSurface = null
     }
 
+    private fun renderEncoderFrame(sourceTimestampNs: Long) {
+        if (!encoderOutputEnabled || encoderEglSurface == EGL14.EGL_NO_SURFACE ||
+            encoderWidth <= 0 || encoderHeight <= 0
+        ) return
+
+        var renderError: Throwable? = null
+        try {
+            checkEgl(
+                EGL14.eglMakeCurrent(
+                    eglDisplay,
+                    encoderEglSurface,
+                    encoderEglSurface,
+                    eglContext,
+                ),
+                "eglMakeCurrent(编码器窗口)",
+            )
+            GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            oesDrawer.draw(oesTextureId, transformMatrix)
+            EGLExt.eglPresentationTimeANDROID(
+                eglDisplay,
+                encoderEglSurface,
+                nextEncoderPresentationTimeNs(sourceTimestampNs),
+            )
+            checkEgl(EGL14.eglSwapBuffers(eglDisplay, encoderEglSurface), "eglSwapBuffers(编码器)")
+        } catch (error: Throwable) {
+            renderError = error
+        } finally {
+            checkEgl(
+                EGL14.eglMakeCurrent(
+                    eglDisplay,
+                    pbufferSurface,
+                    pbufferSurface,
+                    eglContext,
+                ),
+                "eglMakeCurrent(Pbuffer)",
+            )
+        }
+        if (renderError != null) {
+            destroyEncoderSurface()
+            reportError("绘制编码画面失败，预览继续运行", renderError)
+        }
+    }
+
+    private fun nextEncoderPresentationTimeNs(sourceTimestampNs: Long): Long {
+        if (lastEncoderSourceTimestampNs < 0L) {
+            lastEncoderSourceTimestampNs = sourceTimestampNs
+            encoderPresentationTimeNs = 0L
+            encoderResumePending = false
+            return encoderPresentationTimeNs
+        }
+        if (encoderResumePending) {
+            encoderResumePending = false
+            encoderPresentationTimeNs += ENCODER_FRAME_INTERVAL_NS
+        } else {
+            encoderPresentationTimeNs +=
+                (sourceTimestampNs - lastEncoderSourceTimestampNs).coerceAtLeast(1L)
+        }
+        lastEncoderSourceTimestampNs = sourceTimestampNs
+        return encoderPresentationTimeNs
+    }
+
+    private fun resetEncoderTimestamps() {
+        encoderResumePending = false
+        lastEncoderSourceTimestampNs = -1L
+        encoderPresentationTimeNs = 0L
+    }
+
+    private fun destroyEncoderSurface() {
+        encoderOutputEnabled = false
+        if (encoderEglSurface != EGL14.EGL_NO_SURFACE && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            if (!EGL14.eglDestroySurface(eglDisplay, encoderEglSurface)) {
+                Log.w(TAG, "销毁编码器窗口失败，EGL error=" + eglError())
+            }
+        }
+        encoderEglSurface = EGL14.EGL_NO_SURFACE
+        encoderSourceSurface = null
+        encoderWidth = 0
+        encoderHeight = 0
+        resetEncoderTimestamps()
+    }
+
     private fun checkEgl(success: Boolean, operation: String) {
         check(success) { "$operation 失败，EGL error=" + eglError() }
     }
@@ -649,5 +833,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         private const val PREVIEW_WIDTH = 1280
         private const val PREVIEW_HEIGHT = 720
         private const val FRAME_LOG_INTERVAL = 60L
+        private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private const val ENCODER_FRAME_INTERVAL_NS = 1_000_000_000L / 30L
     }
 }

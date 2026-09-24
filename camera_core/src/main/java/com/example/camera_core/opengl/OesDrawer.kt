@@ -45,12 +45,22 @@ class OesDrawer {
         1.0f,  1.0f
     )
 
-    // 对应的纹理坐标
+//    // 对应的纹理坐标
+//    private val textureData = floatArrayOf(
+//        0.0f, 0.0f,
+//        1.0f, 0.0f,
+//        0.0f, 1.0f,
+//        1.0f, 1.0f
+//    )
+
+
+
+    // 纹理坐标 (海报) —— 整体错位，实现逆时针90度
     private val textureData = floatArrayOf(
-        0.0f, 0.0f,
-        1.0f, 0.0f,
-        0.0f, 1.0f,
-        1.0f, 1.0f
+        0.0f, 1.0f,     // 对应顶点3(右上)：钉上海报的【左上角】
+        0.0f, 0.0f,    // 对应顶点2(左上)：钉上海报的【左下角】
+        1.0f, 1.0f,    // 对应顶点1(右下)：钉上海报的【右上角】
+        1.0f, 0.0f,    // 对应顶点0(左下)：钉上海报的【右下角】
     )
 
     private val vertexBuffer: FloatBuffer = ByteBuffer.allocateDirect(vertexData.size * 4)
