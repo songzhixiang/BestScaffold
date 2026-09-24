@@ -1,5 +1,7 @@
 package com.example.bestscaffold.ui.main
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.graphics.Color
 import android.util.Log
@@ -11,7 +13,9 @@ import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.example.bestscaffold.App
 import com.example.bestscaffold.recording.CameraRecordingController
 import com.example.camera_core.view.CameraGLSurfaceView
@@ -31,6 +35,15 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var resumeButton: Button
     private var engine: CameraOesEngine? = null
     private var recordingController: CameraRecordingController? = null
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            startRecordingWithPermission()
+        } else {
+            Toast.makeText(this, "录制声音需要麦克风权限", Toast.LENGTH_SHORT).show()
+        }
+    }
     private val errorListener = CameraOesEngine.ErrorListener { message, cause ->
         Log.e(TAG, message, cause)
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
@@ -190,6 +203,16 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun startRecording() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        startRecordingWithPermission()
+    }
+
+    private fun startRecordingWithPermission() {
         val controller = recordingController
         if (controller == null) {
             Toast.makeText(this, "摄像头尚未就绪", Toast.LENGTH_SHORT).show()

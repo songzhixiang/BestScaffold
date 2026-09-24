@@ -1,11 +1,17 @@
 package com.example.bestscaffold.recording
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.example.camera_core.view.CameraOesEngine
+import com.example.codec_core.audio.AacAudioEncoder
+import com.example.codec_core.audio.PcmAudioRecorder
+import com.example.codec_core.audio.PcmAudioRecorderConfig
+import com.example.codec_core.config.AudioEncoderConfig
 import com.example.codec_core.config.VideoEncoderConfig
 import com.example.codec_core.muxer.RecordedSegment
 import com.example.codec_core.muxer.SegmentedMp4Recorder
@@ -39,7 +45,9 @@ class CameraRecordingController(
     private data class Session(
         val id: Long,
         val recorder: SegmentedMp4Recorder,
-        val encoder: H264Encoder,
+        val videoEncoder: H264Encoder,
+        val audioEncoder: AacAudioEncoder,
+        val audioRecorder: PcmAudioRecorder,
         val inputSurface: android.view.Surface,
     )
 
@@ -70,6 +78,10 @@ class CameraRecordingController(
         loopRecordingEnabled: Boolean = true,
         segmentDurationMs: Long = DEFAULT_SEGMENT_DURATION_MS,
     ) {
+        check(
+            applicationContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        ) { "缺少录音权限，无法开始带声音的视频录制" }
         val sessionId: Long
         synchronized(lock) {
             check(state == State.IDLE) { "当前状态 $state 不能开始录制" }
@@ -79,7 +91,9 @@ class CameraRecordingController(
         notifyStateChanged(State.STARTING)
 
         var recorder: SegmentedMp4Recorder? = null
-        var encoder: H264Encoder? = null
+        var videoEncoder: H264Encoder? = null
+        var audioEncoder: AacAudioEncoder? = null
+        var audioRecorder: PcmAudioRecorder? = null
         try {
             val outputDirectory = File(
                 checkNotNull(applicationContext.getExternalFilesDir(Environment.DIRECTORY_MOVIES)) {
@@ -93,7 +107,7 @@ class CameraRecordingController(
                     filePrefix = FILE_PREFIX,
                     loopRecordingEnabled = loopRecordingEnabled,
                     segmentDurationMs = segmentDurationMs,
-                    audioEnabled = false,
+                    audioEnabled = true,
                 ),
                 listener = createRecorderListener(sessionId),
             )
@@ -108,18 +122,44 @@ class CameraRecordingController(
                 ),
                 callback = createdRecorder.videoCallback,
             )
-            encoder = createdEncoder
+            videoEncoder = createdEncoder
+            val audioConfig = AudioEncoderConfig(
+                sampleRate = AUDIO_SAMPLE_RATE,
+                channelCount = AUDIO_CHANNEL_COUNT,
+                bitRate = AUDIO_BIT_RATE,
+            )
+            val createdAudioEncoder = AacAudioEncoder(
+                config = audioConfig,
+                callback = createdRecorder.audioCallback,
+            )
+            audioEncoder = createdAudioEncoder
+            val createdAudioRecorder = PcmAudioRecorder(
+                config = PcmAudioRecorderConfig(
+                    sampleRate = audioConfig.sampleRate,
+                    channelCount = audioConfig.channelCount,
+                ),
+            )
+            audioRecorder = createdAudioRecorder
             createdRecorder.setKeyFrameRequester(createdEncoder::requestKeyFrame)
             createdRecorder.start()
             createdEncoder.start()
+            createdAudioEncoder.start()
             val inputSurface = checkNotNull(createdEncoder.inputSurface) {
                 "H.264 编码器没有创建输入 Surface"
             }
-            val createdSession = Session(sessionId, createdRecorder, createdEncoder, inputSurface)
+            val createdSession = Session(
+                sessionId,
+                createdRecorder,
+                createdEncoder,
+                createdAudioEncoder,
+                createdAudioRecorder,
+                inputSurface,
+            )
             synchronized(lock) {
                 check(state == State.STARTING && session == null) { "录制启动过程已被取消" }
                 session = createdSession
             }
+            createdAudioRecorder.start(createAudioRecorderListener(createdSession))
             cameraEngine.attachEncoderSurface(
                 inputSurface,
                 VIDEO_WIDTH,
@@ -133,14 +173,24 @@ class CameraRecordingController(
             }
         } catch (error: Throwable) {
             try {
+                audioRecorder?.release()
+            } catch (cleanupError: Throwable) {
+                Log.w(TAG, "释放未完成的录音器失败", cleanupError)
+            }
+            try {
                 recorder?.stop()
             } catch (cleanupError: Throwable) {
                 Log.w(TAG, "停止未完成的封装器失败", cleanupError)
             }
             try {
-                encoder?.release()
+                audioEncoder?.release()
             } catch (cleanupError: Throwable) {
-                Log.w(TAG, "释放未完成的编码器失败", cleanupError)
+                Log.w(TAG, "释放未完成的 AAC 编码器失败", cleanupError)
+            }
+            try {
+                videoEncoder?.release()
+            } catch (cleanupError: Throwable) {
+                Log.w(TAG, "释放未完成的视频编码器失败", cleanupError)
             }
             synchronized(lock) {
                 session = null
@@ -165,10 +215,21 @@ class CameraRecordingController(
         notifyStateChanged(State.STOPPING)
         cameraEngine.detachEncoderSurface(current.inputSurface) {
             if (!isCurrentSession(current)) return@detachEncoderSurface
+            current.audioRecorder.stop()
+            var eosFailed = false
             try {
-                current.encoder.signalEndOfStream()
+                current.videoEncoder.signalEndOfStream()
             } catch (error: Throwable) {
+                eosFailed = true
                 notifyError("通知视频编码器结束失败", error)
+            }
+            try {
+                current.audioEncoder.signalEndOfStream()
+            } catch (error: Throwable) {
+                eosFailed = true
+                notifyError("通知 AAC 编码器结束失败", error)
+            }
+            if (eosFailed) {
                 current.recorder.stop()
             }
             scheduleStopTimeout(current)
@@ -183,6 +244,7 @@ class CameraRecordingController(
             state = State.PAUSED
         }
         cameraEngine.pauseEncoderOutput(current.inputSurface)
+        current.audioRecorder.pause()
         notifyStateChanged(State.PAUSED)
     }
 
@@ -194,7 +256,8 @@ class CameraRecordingController(
             state = State.RECORDING
         }
         cameraEngine.resumeEncoderOutput(current.inputSurface)
-        current.encoder.requestKeyFrame()
+        current.audioRecorder.resume()
+        current.videoEncoder.requestKeyFrame()
         notifyStateChanged(State.RECORDING)
     }
 
@@ -220,10 +283,16 @@ class CameraRecordingController(
         }
         notifyStateChanged(State.STOPPING)
         cameraEngine.detachEncoderSurface(current.inputSurface) {
+            current.audioRecorder.release()
             try {
-                current.encoder.stop()
+                current.audioEncoder.stop()
             } catch (error: Throwable) {
-                Log.w(TAG, "停止异常编码器失败", error)
+                Log.w(TAG, "停止异常 AAC 编码器失败", error)
+            }
+            try {
+                current.videoEncoder.stop()
+            } catch (error: Throwable) {
+                Log.w(TAG, "停止异常视频编码器失败", error)
             }
             current.recorder.stop()
         }
@@ -234,8 +303,14 @@ class CameraRecordingController(
             session?.takeIf { it.id == sessionId }
         } ?: return
         cameraEngine.detachEncoderSurface(current.inputSurface) {
+            current.audioRecorder.release()
             try {
-                current.encoder.release()
+                current.audioEncoder.release()
+            } catch (error: Throwable) {
+                Log.w(TAG, "释放 AAC 编码器失败", error)
+            }
+            try {
+                current.videoEncoder.release()
             } catch (error: Throwable) {
                 Log.w(TAG, "释放视频编码器失败", error)
             }
@@ -256,14 +331,40 @@ class CameraRecordingController(
         mainHandler.postDelayed({
             if (!isCurrentSession(current) || state != State.STOPPING) return@postDelayed
             Log.w(TAG, "等待编码器 EOS 超时，强制结束当前录制")
+            current.audioRecorder.release()
             try {
-                current.encoder.stop()
+                current.audioEncoder.stop()
+            } catch (error: Throwable) {
+                Log.w(TAG, "强制停止 AAC 编码器失败", error)
+            }
+            try {
+                current.videoEncoder.stop()
             } catch (error: Throwable) {
                 Log.w(TAG, "强制停止视频编码器失败", error)
             }
             current.recorder.stop()
         }, STOP_TIMEOUT_MS)
     }
+
+    private fun createAudioRecorderListener(current: Session): PcmAudioRecorder.Listener =
+        object : PcmAudioRecorder.Listener {
+            override fun onPcmData(data: ByteArray, size: Int, presentationTimeUs: Long) {
+                val queued = current.audioEncoder.queuePcm(
+                    data = data,
+                    size = size,
+                    presentationTimeUs = presentationTimeUs,
+                )
+                if (!queued && isCurrentSession(current) && state != State.STOPPING) {
+                    Log.w(TAG, "AAC 输入队列已满，本次 PCM 数据被丢弃：size=$size")
+                }
+            }
+
+            override fun onError(message: String, cause: Throwable?) {
+                mainHandler.post {
+                    failSession(current, message, cause)
+                }
+            }
+        }
 
     private fun createRecorderListener(sessionId: Long): SegmentedRecorderListener =
         object : SegmentedRecorderListener {
@@ -312,6 +413,9 @@ class CameraRecordingController(
         private const val VIDEO_BIT_RATE = 4_000_000
         private const val VIDEO_FRAME_RATE = 30
         private const val I_FRAME_INTERVAL_SECONDS = 2
+        private const val AUDIO_SAMPLE_RATE = 48_000
+        private const val AUDIO_CHANNEL_COUNT = 1
+        private const val AUDIO_BIT_RATE = 128_000
         private const val DEFAULT_SEGMENT_DURATION_MS = 30_000L
         private const val STOP_TIMEOUT_MS = 8_000L
     }
