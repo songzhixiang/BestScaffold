@@ -14,7 +14,7 @@ def hasReleaseSigning = signingKeys.every { signingProperties.getProperty(it)?.t
 
 android {
     namespace 'com.example.bestscaffold'
-    compileSdk 32
+    compileSdk 35
 
     defaultConfig {
         applicationId "com.example.bestscaffold"

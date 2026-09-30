@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace 'com.example.codec_core'
-    compileSdk 32
+    compileSdk 35
 
     defaultConfig {
         minSdk 31
@@ -33,4 +33,5 @@ dependencies {
     implementation libs.androidx.core.ktx
     implementation libs.androidx.appcompat
     implementation libs.material
+    implementation libs.androidx.media3.muxer
 }

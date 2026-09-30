@@ -53,7 +53,7 @@ flowchart LR
         AudioCallback["SegmentedMp4Recorder.audioCallback"]
         VideoCallback["SegmentedMp4Recorder.videoCallback"]
         Segmenter["分段边界与音视频样本路由"]
-        Muxer["MediaMuxer"]
+        Muxer["Media3 FragmentedMp4Muxer"]
         MP4["MP4<br/>avc1 + mp4a"]
         AudioCallback --> Segmenter
         VideoCallback --> Segmenter
@@ -95,7 +95,7 @@ flowchart TB
 
     subgraph MUX["Segmented-Muxer-Thread"]
         Samples["等待格式/分段的样本队列"]
-        Write["MediaMuxer.writeSampleData"]
+        Write["FragmentedMp4Muxer.writeSampleData"]
         Samples --> Write
     end
 
@@ -191,7 +191,7 @@ sequenceDiagram
     PCM->>AAC: queuePcm(data, pts)
     AAC-->>Mux: onOutputFormatChanged(AAC)
     AAC-->>Mux: onEncodedFrame(AAC)
-    Note over Mux: 等待视频与音频格式都就绪后<br/>创建并启动 MediaMuxer
+    Note over Mux: 等待视频与音频格式都就绪后<br/>创建 FragmentedMp4Muxer 并添加全部 Track
 ```
 
 ## 8. 暂停与恢复
@@ -241,7 +241,7 @@ sequenceDiagram
     AAC-->>Mux: 剩余 AAC 帧
     AAC-->>Mux: EncodedFrame(EOS)
     Mux->>File: 写入剩余音视频样本
-    Mux->>File: MediaMuxer.stop + release
+    Mux->>File: FragmentedMp4Muxer.close
     Mux-->>RC: onRecordingCompleted()
     RC->>AAC: release()
 ```
@@ -257,7 +257,7 @@ flowchart LR
     Request["请求视频关键帧"]
     AudioHold["暂存边界附近 AAC 帧"]
     Key["收到关键帧"]
-    Next["创建下一 MediaMuxer<br/>添加 AVC + AAC Track"]
+    Next["创建下一 FragmentedMp4Muxer<br/>添加 AVC + AAC Track"]
     Route["按边界 PTS 分配 AAC 帧"]
     Finalize["后台结束旧分段"]
 
@@ -272,7 +272,7 @@ flowchart LR
 2. 等待关键帧期间暂存音频样本。
 3. 新关键帧成为下一段的起点。
 4. 边界前的 AAC 样本写入旧段，边界后的 AAC 样本写入新段。
-5. 旧 Muxer 在 Finalizer 线程执行 `stop/release`，新段继续接收编码数据。
+5. 旧 Muxer 在 Finalizer 线程执行 `close`，新段继续接收编码数据。
 
 ## 11. 状态与异常传播
 
@@ -307,7 +307,7 @@ PcmAudioRecorder.stop
     → AudioRecord.release
     → AacAudioEncoder.signalEndOfStream
     → 等待 AAC EOS
-    → MediaMuxer.stop/release
+    → FragmentedMp4Muxer.close
     → AacAudioEncoder.release
 ```
 

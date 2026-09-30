@@ -1,15 +1,19 @@
 package com.example.codec_core.muxer
 
-import android.media.MediaCodec
 import android.media.MediaFormat
-import android.media.MediaMuxer
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import androidx.media3.common.C
+import androidx.media3.common.Format
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.muxer.BufferInfo
+import androidx.media3.muxer.FragmentedMp4Muxer
 import com.example.codec_core.api.EncodedFrame
 import com.example.codec_core.api.EncoderCallback
 import java.io.Closeable
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 import java.util.Locale
@@ -22,9 +26,11 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * 将持续编码的音视频流切成多个可独立播放的 MP4 文件。
  *
- * MediaCodec 在整个录制期间保持运行；每个分段使用新的 MediaMuxer。切片瞬间，新 Muxer
- * 接管后续样本，旧 Muxer 在独立线程执行 stop/release，避免阻塞编码器回调。
+ * MediaCodec 在整个录制期间保持运行；每个外部分段使用新的 FragmentedMp4Muxer。
+ * 文件内部周期性写出 moof/mdat，异常中断时已完整写出的 fragment 仍可被支持 fMP4 的播放器读取。
+ * 切片瞬间，新 Muxer 接管后续样本，旧 Muxer 在独立线程收尾，避免阻塞编码器回调。
  */
+@UnstableApi
 class SegmentedMp4Recorder(
     private val config: SegmentedRecorderConfig,
     private val listener: SegmentedRecorderListener = object : SegmentedRecorderListener {},
@@ -48,7 +54,7 @@ class SegmentedMp4Recorder(
     private class Segment(
         val index: Int,
         val file: File,
-        val muxer: MediaMuxer,
+        val muxer: FragmentedMp4Muxer,
         val videoTrackIndex: Int,
         val audioTrackIndex: Int?,
         val basePresentationTimeUs: Long,
@@ -334,17 +340,39 @@ class SegmentedMp4Recorder(
                 index,
             )
             val file = File(config.outputDirectory, fileName)
-            val muxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            if (config.orientationHint != 0) muxer.setOrientationHint(config.orientationHint)
-            val videoTrack = muxer.addTrack(checkNotNull(videoFormat))
-            val audioTrack = if (config.audioEnabled) {
-                muxer.addTrack(checkNotNull(audioFormat))
-            } else {
-                null
+            val outputChannel = FileOutputStream(file).channel
+            val muxer = try {
+                FragmentedMp4Muxer.Builder(outputChannel)
+                    .setFragmentDurationMs(config.fragmentDurationMs)
+                    .setSampleCopyingEnabled(false)
+                    .build()
+            } catch (error: Throwable) {
+                try {
+                    outputChannel.close()
+                } catch (closeError: Throwable) {
+                    error.addSuppressed(closeError)
+                }
+                throw error
             }
-            muxer.start()
-            Segment(index, file, muxer, videoTrack, audioTrack, baseTimeUs).also {
-                notifySegmentStarted(it)
+            try {
+                val videoTrack = muxer.addTrack(
+                    checkNotNull(videoFormat).toMedia3Format(TrackType.VIDEO),
+                )
+                val audioTrack = if (config.audioEnabled) {
+                    muxer.addTrack(checkNotNull(audioFormat).toMedia3Format(TrackType.AUDIO))
+                } else {
+                    null
+                }
+                Segment(index, file, muxer, videoTrack, audioTrack, baseTimeUs).also {
+                    notifySegmentStarted(it)
+                }
+            } catch (error: Throwable) {
+                try {
+                    muxer.close()
+                } catch (closeError: Throwable) {
+                    error.addSuppressed(closeError)
+                }
+                throw error
             }
         } catch (error: Throwable) {
             fail("创建 MP4 分段失败", error)
@@ -372,11 +400,8 @@ class SegmentedMp4Recorder(
                     segment.lastAudioTimeUs = adjustedTimeUs
                 }
             }
-            val flags = frame.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG.inv() and
-                MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv()
-            val info = MediaCodec.BufferInfo().apply {
-                set(0, frame.data.size, adjustedTimeUs, flags)
-            }
+            val flags = if (frame.isKeyFrame) C.BUFFER_FLAG_KEY_FRAME else 0
+            val info = BufferInfo(adjustedTimeUs, frame.data.size, flags)
             segment.muxer.writeSampleData(trackIndex, ByteBuffer.wrap(frame.data), info)
             segment.lastSourceTimeUs = maxOf(segment.lastSourceTimeUs, frame.presentationTimeUs)
         } catch (error: Throwable) {
@@ -425,17 +450,10 @@ class SegmentedMp4Recorder(
         finalizer.execute {
             var successful = true
             try {
-                segment.muxer.stop()
+                segment.muxer.close()
             } catch (error: Throwable) {
                 successful = false
-                reportError("结束第 ${segment.index} 个 MP4 分段失败", error)
-            } finally {
-                try {
-                    segment.muxer.release()
-                } catch (error: Throwable) {
-                    successful = false
-                    reportError("释放第 ${segment.index} 个 MediaMuxer 失败", error)
-                }
+                reportError("关闭第 ${segment.index} 个 FragmentedMp4Muxer 失败", error)
             }
             val durationUs = (segment.lastSourceTimeUs - segment.basePresentationTimeUs)
                 .coerceAtLeast(0L)
@@ -491,6 +509,48 @@ class SegmentedMp4Recorder(
             Log.e(TAG, "分段开始回调执行失败", error)
         }
     }
+
+    private fun MediaFormat.toMedia3Format(trackType: TrackType): Format {
+        val builder = Format.Builder()
+            .setSampleMimeType(checkNotNull(getString(MediaFormat.KEY_MIME)) {
+                "MediaFormat 缺少 MIME 类型"
+            })
+            .setInitializationData(copyCodecSpecificData())
+
+        getIntegerOrNull(MediaFormat.KEY_BIT_RATE)?.let(builder::setAverageBitrate)
+        when (trackType) {
+            TrackType.VIDEO -> {
+                getIntegerOrNull(MediaFormat.KEY_WIDTH)?.let(builder::setWidth)
+                getIntegerOrNull(MediaFormat.KEY_HEIGHT)?.let(builder::setHeight)
+                getNumberOrNull(MediaFormat.KEY_FRAME_RATE)?.toFloat()?.let(builder::setFrameRate)
+                builder.setRotationDegrees(config.orientationHint)
+            }
+
+            TrackType.AUDIO -> {
+                getIntegerOrNull(MediaFormat.KEY_CHANNEL_COUNT)?.let(builder::setChannelCount)
+                getIntegerOrNull(MediaFormat.KEY_SAMPLE_RATE)?.let(builder::setSampleRate)
+            }
+        }
+        return builder.build()
+    }
+
+    private fun MediaFormat.copyCodecSpecificData(): List<ByteArray> {
+        val result = mutableListOf<ByteArray>()
+        var index = 0
+        while (containsKey("csd-$index")) {
+            val source = checkNotNull(getByteBuffer("csd-$index")).duplicate()
+            source.position(0)
+            result += ByteArray(source.remaining()).also(source::get)
+            index++
+        }
+        return result
+    }
+
+    private fun MediaFormat.getIntegerOrNull(key: String): Int? =
+        if (containsKey(key)) getInteger(key) else null
+
+    private fun MediaFormat.getNumberOrNull(key: String): Number? =
+        if (containsKey(key)) getNumber(key) else null
 
     private fun post(allowWhenStopping: Boolean = false, block: () -> Unit) {
         if ((!allowWhenStopping && stopRequested.get()) || state == State.STOPPED) return

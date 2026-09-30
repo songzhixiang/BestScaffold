@@ -7,6 +7,8 @@ data class SegmentedRecorderConfig(
     val filePrefix: String = "record",
     val loopRecordingEnabled: Boolean = true,
     val segmentDurationMs: Long = 30_000L,
+    /** 单个文件内部的 fMP4 fragment 目标时长；实际边界会等待视频关键帧。 */
+    val fragmentDurationMs: Long = 2_000L,
     val audioEnabled: Boolean = true,
     val audioDrainTimeoutMs: Long = 1_000L,
     val maxBufferedSamples: Int = 512,
@@ -15,6 +17,7 @@ data class SegmentedRecorderConfig(
     init {
         require(filePrefix.isNotBlank()) { "分段文件名前缀不能为空" }
         require(segmentDurationMs > 0) { "分段时长必须大于 0" }
+        require(fragmentDurationMs > 0) { "fMP4 fragment 时长必须大于 0" }
         require(audioDrainTimeoutMs >= 0) { "音频排空超时不能小于 0" }
         require(maxBufferedSamples > 0) { "缓存样本数量必须大于 0" }
         require(orientationHint in setOf(0, 90, 180, 270)) { "视频方向只能是 0、90、180 或 270" }

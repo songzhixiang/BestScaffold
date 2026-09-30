@@ -62,7 +62,7 @@ flowchart TB
         CameraFramework["Camera2 Framework / Camera HAL"]
         EGL["EGL / OpenGL ES"]
         MediaCodec["MediaCodec"]
-        MediaMuxer["MediaMuxer"]
+        MediaMuxer["Media3 FragmentedMp4Muxer"]
         Storage["应用 Movies/recordings<br/>MP4 文件"]
     end
 
@@ -113,8 +113,8 @@ flowchart LR
     AudioCallback["audioCallback<br/>AAC 格式与编码帧"]
 
     Segmented["SegmentedMp4Recorder"]
-    MuxerA["当前 MediaMuxer"]
-    MuxerB["下一段 MediaMuxer"]
+    MuxerA["当前 FragmentedMp4Muxer"]
+    MuxerB["下一段 FragmentedMp4Muxer"]
     Files["dvr_时间_序号.mp4"]
 
     Camera --> Session --> InputSurface --> SurfaceTexture --> OES --> Update --> Drawer
@@ -191,7 +191,7 @@ flowchart TB
 - Camera、`SurfaceTexture`、EGLContext、OES 纹理及所有 EGLSurface 都只由 `OES-Render-Thread` 操作。
 - `AudioRecord` 的阻塞读取只在 `PCM-AudioRecord-Thread` 执行，按已提交采样数生成连续音频 PTS。
 - MediaCodec 的创建、输入/输出回调与释放由各自编码线程负责。
-- MediaMuxer 的样本写入在单独的分段线程串行执行，旧分段在 Finalizer 线程收尾，避免阻塞后续编码数据。
+- Media3 `FragmentedMp4Muxer` 的样本写入在单独的分段线程串行执行；文件内部默认约每 2 秒生成一个 fMP4 fragment，旧文件在 Finalizer 线程关闭，避免阻塞后续编码数据。
 - UI 只发出控制命令并观察状态，不直接持有底层 GL 或 MediaCodec 资源。
 
 ## 4. 录制与分段时序
