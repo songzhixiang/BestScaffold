@@ -18,6 +18,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.example.bestscaffold.App
 import com.example.bestscaffold.recording.CameraRecordingController
+import com.example.camera_core.api.CameraInventoryQuery
 import com.example.camera_core.view.CameraGLSurfaceView
 import com.example.camera_core.view.CameraOesEngine
 import com.example.codec_core.muxer.RecordedSegment
@@ -27,7 +28,9 @@ import java.io.File
 class CameraActivity : AppCompatActivity() {
 
     private lateinit var surfaceView: CameraGLSurfaceView
+    private lateinit var cameraStatusView: TextView
     private lateinit var recordingStatusView: TextView
+    private lateinit var outputPathView: TextView
     private lateinit var loopRecordingSwitch: Switch
     private lateinit var recordButton: Button
     private lateinit var stopButton: Button
@@ -35,6 +38,16 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var resumeButton: Button
     private var engine: CameraOesEngine? = null
     private var recordingController: CameraRecordingController? = null
+    private val cameraPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            openEngineWithPermission()
+        } else {
+            cameraStatusView.text = "摄像头：未授权"
+            Toast.makeText(this, "预览和录像需要摄像头权限", Toast.LENGTH_LONG).show()
+        }
+    }
     private val audioPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -56,6 +69,7 @@ class CameraActivity : AppCompatActivity() {
         override fun onSegmentStarted(index: Int, file: File) {
             Log.i(TAG, "开始录制第 ${index + 1} 段：${file.absolutePath}")
             recordingStatusView.text = "正在录制第 ${index + 1} 段"
+            outputPathView.text = "当前文件：${file.absolutePath}"
         }
 
         override fun onSegmentCompleted(segment: RecordedSegment) {
@@ -67,8 +81,8 @@ class CameraActivity : AppCompatActivity() {
             )
             Toast.makeText(
                 this@CameraActivity,
-                "第 ${segment.index + 1} 段已保存",
-                Toast.LENGTH_SHORT,
+                "第 ${segment.index + 1} 段已保存到\n${segment.file.parent}",
+                Toast.LENGTH_LONG,
             ).show()
         }
 
@@ -107,6 +121,12 @@ class CameraActivity : AppCompatActivity() {
             ),
         )
 
+        cameraStatusView = TextView(this).apply {
+            text = "摄像头：等待授权"
+            setPadding(16, 8, 16, 8)
+        }
+        root.addView(cameraStatusView)
+
         val recordingOptions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -126,6 +146,12 @@ class CameraActivity : AppCompatActivity() {
         recordingOptions.addView(loopRecordingSwitch)
         root.addView(recordingOptions)
 
+        outputPathView = TextView(this).apply {
+            text = "录像目录：将在摄像头初始化后显示"
+            setPadding(16, 8, 16, 8)
+        }
+        root.addView(outputPathView)
+
         val recordingControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         recordButton = addButton(recordingControls, "录制") { startRecording() }
         stopButton = addButton(recordingControls, "停止") { recordingController?.stop() }
@@ -140,7 +166,7 @@ class CameraActivity : AppCompatActivity() {
             (application as App).releaseCameraEngine()
             Toast.makeText(this, "摄像头正在释放", Toast.LENGTH_SHORT).show()
         }
-        addButton(cameraControls, "重新打开") { openEngine() }
+        addButton(cameraControls, "重新打开") { ensureCameraPermissionAndOpen() }
         root.addView(cameraControls)
         setContentView(root)
         updateRecordingControls(CameraRecordingController.State.IDLE)
@@ -160,7 +186,7 @@ class CameraActivity : AppCompatActivity() {
                 engine?.detachPreviewSurface(holder.surface)
             }
         })
-        openEngine()
+        ensureCameraPermissionAndOpen()
     }
 
     override fun onStart() {
@@ -185,19 +211,54 @@ class CameraActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    private fun openEngine() {
+    private fun ensureCameraPermissionAndOpen() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            openEngineWithPermission()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun openEngineWithPermission() {
         try {
-            val current = (application as App).getOrStartCameraEngine(CAMERA_ID)
+            val inventory = CameraInventoryQuery.query(this)
+            CameraInventoryQuery.log(inventory, TAG)
+            val cameraId = inventory.resolveCameraId(PREFERRED_CAMERA_ID)
+            if (cameraId == null) {
+                cameraStatusView.text = "摄像头：本机没有可用设备"
+                updateRecordingControls(CameraRecordingController.State.IDLE)
+                Toast.makeText(this, "本机没有可用摄像头", Toast.LENGTH_LONG).show()
+                return
+            }
+            val fallback = cameraId != PREFERRED_CAMERA_ID
+            cameraStatusView.text = if (fallback) {
+                "摄像头：$cameraId（未找到 $PREFERRED_CAMERA_ID，已自动回退）"
+            } else {
+                "摄像头：$cameraId"
+            }
+            Log.i(
+                TAG,
+                "可见摄像头=${inventory.cameraIds}，期望=$PREFERRED_CAMERA_ID，实际=$cameraId",
+            )
+
+            val current = (application as App).getOrStartCameraEngine(cameraId)
             engine = current
             current.setErrorListener(errorListener)
             recordingController = (application as App)
-                .getOrCreateRecordingController(CAMERA_ID)
-                .also { it.setListener(recordingListener) }
+                .getOrCreateRecordingController(cameraId)
+                .also {
+                    it.setListener(recordingListener)
+                    outputPathView.text = "录像目录：${it.outputDirectory.absolutePath}"
+                }
             attachVisiblePreview()
             if (current.isCapturing()) {
                 Toast.makeText(this, "摄像头已经在采集", Toast.LENGTH_SHORT).show()
             }
-        } catch (error: IllegalStateException) {
+        } catch (error: Exception) {
+            Log.e(TAG, "初始化摄像头失败", error)
+            cameraStatusView.text = "摄像头：初始化失败"
             Toast.makeText(this, error.message ?: "摄像头暂时无法打开", Toast.LENGTH_SHORT).show()
         }
     }
@@ -236,7 +297,8 @@ class CameraActivity : AppCompatActivity() {
             CameraRecordingController.State.PAUSED -> "录制状态：已暂停"
             CameraRecordingController.State.STOPPING -> "录制状态：正在保存"
         }
-        recordButton.isEnabled = state == CameraRecordingController.State.IDLE
+        recordButton.isEnabled = recordingController != null &&
+            state == CameraRecordingController.State.IDLE
         stopButton.isEnabled = state == CameraRecordingController.State.STARTING ||
             state == CameraRecordingController.State.RECORDING ||
             state == CameraRecordingController.State.PAUSED
@@ -268,7 +330,7 @@ class CameraActivity : AppCompatActivity() {
 
     private companion object {
         private const val TAG = "CameraActivity"
-        private const val CAMERA_ID = "103"
+        private const val PREFERRED_CAMERA_ID = "101"
         private const val PREVIEW_WIDTH = 1280
         private const val PREVIEW_HEIGHT = 720
         private const val SEGMENT_DURATION_MS = 30_000L

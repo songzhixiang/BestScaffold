@@ -55,6 +55,21 @@ class CameraRecordingController(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val lock = Any()
 
+    /**
+     * Android 10 及以上可直接写入应用专属 Movies 目录，不需要存储权限。
+     * 外部存储暂时不可用时回退到内部 files/Movies，保证手机上仍能开始录制。
+     */
+    val outputDirectory: File by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        val moviesDirectory = applicationContext
+            .getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+            ?: File(applicationContext.filesDir, Environment.DIRECTORY_MOVIES)
+        File(moviesDirectory, OUTPUT_DIRECTORY_NAME).also { directory ->
+            check(directory.isDirectory || directory.mkdirs()) {
+                "无法创建录像目录：${directory.absolutePath}"
+            }
+        }
+    }
+
     @Volatile
     var state: State = State.IDLE
         private set
@@ -95,12 +110,6 @@ class CameraRecordingController(
         var audioEncoder: AacAudioEncoder? = null
         var audioRecorder: PcmAudioRecorder? = null
         try {
-            val outputDirectory = File(
-                checkNotNull(applicationContext.getExternalFilesDir(Environment.DIRECTORY_MOVIES)) {
-                    "无法取得应用视频目录"
-                },
-                OUTPUT_DIRECTORY_NAME,
-            )
             val createdRecorder = SegmentedMp4Recorder(
                 config = SegmentedRecorderConfig(
                     outputDirectory = outputDirectory,

@@ -132,11 +132,11 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
             viewModel.handleEvent(MainEvent.OnButtonClick)
         }
 
-//        if (binding.cameraSurfaceview.camera == null) {
-//            binding.cameraSurfaceview.setCameraOpenCallback(callback)
-//            binding.cameraSurfaceview.setCameraPreviewDataCallback(previewCallback)
-//            binding.cameraSurfaceview.setCamera(Camera2API(this, cameraId),false)
-//        }
+        if (binding.cameraSurfaceview.camera == null) {
+            binding.cameraSurfaceview.setCameraOpenCallback(callback)
+            binding.cameraSurfaceview.setCameraPreviewDataCallback(previewCallback)
+            binding.cameraSurfaceview.setCamera(Camera2API(this, cameraId),false)
+        }
 
         cameraOesEngine = (application as App).getOrStartCameraEngine(cameraId).also { engine ->
             engine.setErrorListener(oesErrorListener)
@@ -150,16 +150,16 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
 
     override fun onStop() {
         cameraOesEngine?.clearErrorListener(oesErrorListener)
-        // 页面退到后台只解除 UI 监听，不暂停进程级摄像头采集。
-//        binding.cameraSurfaceview.pausePreview()
+//         页面退到后台只解除 UI 监听，不暂停进程级摄像头采集。
+        binding.cameraSurfaceview.pausePreview()
         super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
-//        if (binding.cameraSurfaceview.camera != null) {
-//            binding.cameraSurfaceview.startPreview()
-//        }
+        if (binding.cameraSurfaceview.camera != null) {
+            binding.cameraSurfaceview.startPreview()
+        }
     }
 
     override fun onDestroy() {

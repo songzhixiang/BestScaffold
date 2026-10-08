@@ -23,6 +23,18 @@ data class CameraCapabilities(
 data class CameraInventory(val cameras: List<CameraCapabilities>) {
     val count: Int get() = cameras.size
     val cameraIds: List<String> get() = cameras.map(CameraCapabilities::cameraId)
+
+    /**
+     * 优先返回指定摄像头；指定 ID 不存在时，优先选择后置摄像头，最后回退到首个可见 ID。
+     * Camera2 没有跨设备通用的“默认摄像头 ID”，因此不能假定手机一定存在 0 或 1。
+     */
+    fun resolveCameraId(preferredCameraId: String): String? {
+        cameras.firstOrNull { it.cameraId == preferredCameraId }?.let { return it.cameraId }
+        cameras.firstOrNull {
+            it.lensFacing == CameraCharacteristics.LENS_FACING_BACK
+        }?.let { return it.cameraId }
+        return cameras.firstOrNull()?.cameraId
+    }
 }
 
 /**
