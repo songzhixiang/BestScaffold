@@ -9,6 +9,7 @@ import android.view.Gravity
 import android.view.SurfaceHolder
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
@@ -19,10 +20,14 @@ import androidx.core.content.ContextCompat
 import com.example.bestscaffold.App
 import com.example.bestscaffold.recording.CameraRecordingController
 import com.example.camera_core.api.CameraInventoryQuery
+import com.example.camera_core.opengl.OesRenderTransform
+import com.example.camera_core.opengl.OesSwirlEffect
+import com.example.camera_core.opengl.ProjectionMode
 import com.example.camera_core.view.CameraGLSurfaceView
 import com.example.camera_core.view.CameraOesEngine
 import com.example.codec_core.muxer.RecordedSegment
 import java.io.File
+import java.util.Locale
 
 /** 仅管理预览窗口；采集引擎由 Application 持有，不随页面销毁而释放。 */
 class CameraActivity : AppCompatActivity() {
@@ -31,6 +36,7 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var cameraStatusView: TextView
     private lateinit var recordingStatusView: TextView
     private lateinit var outputPathView: TextView
+    private lateinit var matrixStatusView: TextView
     private lateinit var loopRecordingSwitch: Switch
     private lateinit var recordButton: Button
     private lateinit var stopButton: Button
@@ -38,6 +44,15 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var resumeButton: Button
     private var engine: CameraOesEngine? = null
     private var recordingController: CameraRecordingController? = null
+    private var renderTransform = OesRenderTransform()
+    private var swirlEffect = OesSwirlEffect.fromPixels(
+        enabled = true,
+        centerX = PREVIEW_WIDTH / 2f,
+        centerY = PREVIEW_HEIGHT / 2f,
+        radiusPixels = SWIRL_RADIUS_PIXELS,
+        imageWidth = PREVIEW_WIDTH,
+        imageHeight = PREVIEW_HEIGHT,
+    )
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -152,6 +167,8 @@ class CameraActivity : AppCompatActivity() {
         }
         root.addView(outputPathView)
 
+        addMatrixControls(root)
+
         val recordingControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         recordButton = addButton(recordingControls, "录制") { startRecording() }
         stopButton = addButton(recordingControls, "停止") { recordingController?.stop() }
@@ -246,6 +263,8 @@ class CameraActivity : AppCompatActivity() {
             val current = (application as App).getOrStartCameraEngine(cameraId)
             engine = current
             current.setErrorListener(errorListener)
+            current.setRenderTransform(renderTransform)
+            current.setSwirlEffect(swirlEffect)
             recordingController = (application as App)
                 .getOrCreateRecordingController(cameraId)
                 .also {
@@ -316,6 +335,177 @@ class CameraActivity : AppCompatActivity() {
         current.updateViewport(surfaceView.width, surfaceView.height)
     }
 
+    private fun addMatrixControls(root: LinearLayout) {
+        matrixStatusView = TextView(this).apply {
+            setPadding(16, 8, 16, 8)
+        }
+        root.addView(matrixStatusView)
+
+        root.addView(
+            createScrollableButtonRow(
+                "缩放+" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            scaleX = (renderTransform.scaleX * 1.2f).coerceAtMost(3f),
+                            scaleY = (renderTransform.scaleY * 1.2f).coerceAtMost(3f),
+                        ),
+                    )
+                },
+                "缩放-" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            scaleX = (renderTransform.scaleX / 1.2f).coerceAtLeast(0.2f),
+                            scaleY = (renderTransform.scaleY / 1.2f).coerceAtLeast(0.2f),
+                        ),
+                    )
+                },
+                "旋转90°" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            rotationDegrees = (renderTransform.rotationDegrees + 90f) % 360f,
+                        ),
+                    )
+                },
+                "水平翻转" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            flipHorizontal = !renderTransform.flipHorizontal,
+                        ),
+                    )
+                },
+                "垂直翻转" to {
+                    updateRenderTransform(
+                        renderTransform.copy(flipVertical = !renderTransform.flipVertical),
+                    )
+                },
+            ),
+        )
+        root.addView(
+            createScrollableButtonRow(
+                "左移" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            translationX = (renderTransform.translationX - 0.1f)
+                                .coerceAtLeast(-1f),
+                        ),
+                    )
+                },
+                "右移" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            translationX = (renderTransform.translationX + 0.1f)
+                                .coerceAtMost(1f),
+                        ),
+                    )
+                },
+                "上移" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            translationY = (renderTransform.translationY + 0.1f)
+                                .coerceAtMost(1f),
+                        ),
+                    )
+                },
+                "下移" to {
+                    updateRenderTransform(
+                        renderTransform.copy(
+                            translationY = (renderTransform.translationY - 0.1f)
+                                .coerceAtLeast(-1f),
+                        ),
+                    )
+                },
+                "斜切变形" to { cycleShear() },
+                "3D变形" to { cyclePerspectiveTilt() },
+                "中心漩涡" to {
+                    swirlEffect = swirlEffect.copy(enabled = !swirlEffect.enabled)
+                    engine?.setSwirlEffect(swirlEffect)
+                    updateMatrixStatus()
+                },
+                "重置矩阵" to { updateRenderTransform(OesRenderTransform()) },
+            ),
+        )
+        updateMatrixStatus()
+    }
+
+    private fun createScrollableButtonRow(
+        vararg controls: Pair<String, () -> Unit>,
+    ): HorizontalScrollView = HorizontalScrollView(this).apply {
+        isHorizontalScrollBarEnabled = true
+        addView(
+            LinearLayout(this@CameraActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                controls.forEach { (title, action) ->
+                    addView(
+                        Button(this@CameraActivity).apply {
+                            text = title
+                            setOnClickListener { action() }
+                        },
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                        ),
+                    )
+                }
+            },
+        )
+    }
+
+    private fun cycleShear() {
+        val nextShear = when {
+            renderTransform.shearX == 0f -> 0.3f
+            renderTransform.shearX > 0f -> -0.3f
+            else -> 0f
+        }
+        updateRenderTransform(renderTransform.copy(shearX = nextShear))
+    }
+
+    private fun cyclePerspectiveTilt() {
+        val nextTilt = when {
+            renderTransform.tiltYDegrees == 0f -> 25f
+            renderTransform.tiltYDegrees > 0f -> -25f
+            else -> 0f
+        }
+        updateRenderTransform(
+            renderTransform.copy(
+                tiltYDegrees = nextTilt,
+                projectionMode = if (nextTilt == 0f) {
+                    ProjectionMode.ORTHOGRAPHIC
+                } else {
+                    ProjectionMode.PERSPECTIVE
+                },
+            ),
+        )
+    }
+
+    private fun updateRenderTransform(transform: OesRenderTransform) {
+        renderTransform = transform
+        engine?.setRenderTransform(transform)
+        updateMatrixStatus()
+    }
+
+    private fun updateMatrixStatus() {
+        val projection = when (renderTransform.projectionMode) {
+            ProjectionMode.ORTHOGRAPHIC -> "正交"
+            ProjectionMode.PERSPECTIVE -> "透视"
+        }
+        matrixStatusView.text = String.format(
+            Locale.US,
+            "MVP：缩放 %.2f×%.2f，旋转 %.0f°，平移 (%.1f, %.1f)，" +
+                "翻转 H=%s/V=%s，斜切 %.1f，Y倾斜 %.0f°，%s投影，中心漩涡=%s",
+            renderTransform.scaleX,
+            renderTransform.scaleY,
+            renderTransform.rotationDegrees,
+            renderTransform.translationX,
+            renderTransform.translationY,
+            renderTransform.flipHorizontal,
+            renderTransform.flipVertical,
+            renderTransform.shearX,
+            renderTransform.tiltYDegrees,
+            projection,
+            if (swirlEffect.enabled) "开" else "关",
+        )
+    }
+
     private fun addButton(row: LinearLayout, title: String, action: () -> Unit): Button {
         val button = Button(this).apply {
             text = title
@@ -333,6 +523,7 @@ class CameraActivity : AppCompatActivity() {
         private const val PREFERRED_CAMERA_ID = "101"
         private const val PREVIEW_WIDTH = 1280
         private const val PREVIEW_HEIGHT = 720
+        private const val SWIRL_RADIUS_PIXELS = 260f
         private const val SEGMENT_DURATION_MS = 30_000L
     }
 }

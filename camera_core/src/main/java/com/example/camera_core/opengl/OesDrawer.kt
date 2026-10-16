@@ -12,11 +12,13 @@ class OesDrawer {
     private val vertexShaderCode = """
         attribute vec4 aPosition;
         attribute vec4 aTexCoord;
+        uniform mat4 uMvpMatrix;
         uniform mat4 uSTMatrix;
+        uniform mat4 uUserTextureMatrix;
         varying vec2 vTexCoord;
         void main() {
-            gl_Position = aPosition;
-            vTexCoord = (uSTMatrix * aTexCoord).xy;
+            gl_Position = uMvpMatrix * aPosition;
+            vTexCoord = (uSTMatrix * uUserTextureMatrix * aTexCoord).xy;
         }
     """.trimIndent()
 
@@ -25,17 +27,44 @@ class OesDrawer {
         #extension GL_OES_EGL_image_external : require
         precision mediump float;
         varying vec2 vTexCoord;
-        uniform samplerExternalOES sTexture;
+        uniform samplerExternalOES sTexture; //sTexture 是采样器，不是纹理 ID
+        uniform float uSwirlEnabled;
+        uniform vec2 uSwirlCenter;
+        uniform float uSwirlRadius;
+        uniform float uSwirlStrength;
+        uniform float uTextureAspectRatio;
         void main() {
-            gl_FragColor = texture2D(sTexture, vTexCoord);
+            vec2 sampleCoordinate = vTexCoord;
+            if (uSwirlEnabled > 0.5) {
+                vec2 delta = sampleCoordinate - uSwirlCenter;
+                delta.x *= uTextureAspectRatio;
+                float distanceToCenter = length(delta);
+                if (distanceToCenter < uSwirlRadius) {
+                    float falloff = (uSwirlRadius - distanceToCenter) / uSwirlRadius;
+                    float angle = uSwirlStrength * falloff * falloff;
+                    float sine = sin(angle);
+                    float cosine = cos(angle);
+                    delta = mat2(cosine, -sine, sine, cosine) * delta;
+                    delta.x /= uTextureAspectRatio;
+                    sampleCoordinate = uSwirlCenter + delta;
+                }
+            }
+            gl_FragColor = texture2D(sTexture, clamp(sampleCoordinate, 0.0, 1.0)); //实际上是在对 GPU 说：“请去 sTexture 指定的 0 号卡槽，按照插值得到的 vTexCoord 坐标，把那里的像素颜色捞出来”。
         }
     """.trimIndent()
 
     private var program = 0
     private var aPositionHandle = 0
     private var aTexCoordHandle = 0
+    private var uMvpMatrixHandle = 0
     private var uSTMatrixHandle = 0
+    private var uUserTextureMatrixHandle = 0
     private var textureSamplerHandle = 0
+    private var swirlEnabledHandle = 0
+    private var swirlCenterHandle = 0
+    private var swirlRadiusHandle = 0
+    private var swirlStrengthHandle = 0
+    private var textureAspectRatioHandle = 0
 
     // 铺满全屏的顶点坐标
     private val vertexData = floatArrayOf(
@@ -69,7 +98,9 @@ class OesDrawer {
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(textureData).apply { position(0) }
 
     fun init() {
+        //创建片元着色器
         val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode)
+        //创建顶点着色器
         val fragmentShader = try {
             loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode)
         } catch (error: Exception) {
@@ -78,10 +109,13 @@ class OesDrawer {
         }
 
         try {
+            // 5. 创建程序对象
             program = GLES20.glCreateProgram()
             check(program != 0) { "无法创建 OpenGL 程序" }
+            // 6. 附加着色器
             GLES20.glAttachShader(program, vertexShader)
             GLES20.glAttachShader(program, fragmentShader)
+            // 7. 链接程序
             GLES20.glLinkProgram(program)
 
             val linkStatus = IntArray(1)
@@ -89,13 +123,26 @@ class OesDrawer {
             check(linkStatus[0] == GLES20.GL_TRUE) {
                 "OES 着色器链接失败：${GLES20.glGetProgramInfoLog(program)}"
             }
-
+            GLES20.glUseProgram(program);
+            // 获取 attribute 位置
             aPositionHandle = GLES20.glGetAttribLocation(program, "aPosition")
             aTexCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
+            uMvpMatrixHandle = GLES20.glGetUniformLocation(program, "uMvpMatrix")
             uSTMatrixHandle = GLES20.glGetUniformLocation(program, "uSTMatrix")
+            uUserTextureMatrixHandle = GLES20.glGetUniformLocation(program, "uUserTextureMatrix")
             textureSamplerHandle = GLES20.glGetUniformLocation(program, "sTexture")
-            check(aPositionHandle >= 0 && aTexCoordHandle >= 0 &&
-                uSTMatrixHandle >= 0 && textureSamplerHandle >= 0
+            // 1. 采样器指定纹理单元（永久生效，移出绘制循环）
+            GLES20.glUniform1i(textureSamplerHandle, 0)
+            swirlEnabledHandle = GLES20.glGetUniformLocation(program, "uSwirlEnabled")
+            swirlCenterHandle = GLES20.glGetUniformLocation(program, "uSwirlCenter")
+            swirlRadiusHandle = GLES20.glGetUniformLocation(program, "uSwirlRadius")
+            swirlStrengthHandle = GLES20.glGetUniformLocation(program, "uSwirlStrength")
+            textureAspectRatioHandle = GLES20.glGetUniformLocation(program, "uTextureAspectRatio")
+            check(aPositionHandle >= 0 && aTexCoordHandle >= 0 && uMvpMatrixHandle >= 0 &&
+                uSTMatrixHandle >= 0 && uUserTextureMatrixHandle >= 0 &&
+                textureSamplerHandle >= 0 && swirlEnabledHandle >= 0 &&
+                swirlCenterHandle >= 0 && swirlRadiusHandle >= 0 &&
+                swirlStrengthHandle >= 0 && textureAspectRatioHandle >= 0
             ) { "OES 着色器缺少必需的 attribute 或 uniform" }
         } catch (error: Exception) {
             release()
@@ -106,14 +153,21 @@ class OesDrawer {
         }
     }
 
-    fun draw(textureId: Int, transformMatrix: FloatArray) {
+    fun draw(
+        textureId: Int,
+        textureMatrix: FloatArray,
+        userTextureMatrix: FloatArray,
+        mvpMatrix: FloatArray,
+        swirlEffect: OesSwirlEffect,
+    ) {
         check(program != 0) { "OES 着色器尚未初始化" }
+        // 使用程序
         GLES20.glUseProgram(program)
 
         // 激活 OES 纹理
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-        GLES20.glUniform1i(textureSamplerHandle, 0)
+
 
         // 传入顶点数据
         GLES20.glEnableVertexAttribArray(aPositionHandle)
@@ -123,15 +177,31 @@ class OesDrawer {
         GLES20.glEnableVertexAttribArray(aTexCoordHandle)
         GLES20.glVertexAttribPointer(aTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, textureBuffer)
 
-        // 传入 SurfaceTexture 的纹理坐标变换矩阵。
-        GLES20.glUniformMatrix4fv(uSTMatrixHandle, 1, false, transformMatrix, 0)
+        // MVP 改变顶点几何位置；ST 矩阵只改变 OES 纹理采样坐标。
+        GLES20.glUniformMatrix4fv(uMvpMatrixHandle, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(uSTMatrixHandle, 1, false, textureMatrix, 0)
+        GLES20.glUniformMatrix4fv(
+            uUserTextureMatrixHandle,
+            1,
+            false,
+            userTextureMatrix,
+            0,
+        )
+        GLES20.glUniform1f(swirlEnabledHandle, if (swirlEffect.enabled) 1f else 0f)
+        GLES20.glUniform2f(swirlCenterHandle, swirlEffect.centerX, swirlEffect.centerY)
+        GLES20.glUniform1f(swirlRadiusHandle, swirlEffect.radius)
+        GLES20.glUniform1f(swirlStrengthHandle, swirlEffect.strengthRadians)
+        GLES20.glUniform1f(textureAspectRatioHandle, swirlEffect.textureAspectRatio)
 
         // 绘制
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
+        // 禁用顶点属性
         GLES20.glDisableVertexAttribArray(aPositionHandle)
         GLES20.glDisableVertexAttribArray(aTexCoordHandle)
+        // 解绑纹理
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
+        // 关闭程序
         GLES20.glUseProgram(0)
 
         val error = GLES20.glGetError()
@@ -149,10 +219,14 @@ class OesDrawer {
     }
 
     private fun loadShader(type: Int, shaderCode: String): Int {
+        // 1. 创建着色器对象
         val shader = GLES20.glCreateShader(type)
         check(shader != 0) { "无法创建 OpenGL 着色器，type=$type" }
+        // 2. 上传着色器源代码
         GLES20.glShaderSource(shader, shaderCode)
+        // 3. 编译着色器
         GLES20.glCompileShader(shader)
+        // 4. 检查编译状态
         val compileStatus = IntArray(1)
         GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compileStatus, 0)
         if (compileStatus[0] != GLES20.GL_TRUE) {
