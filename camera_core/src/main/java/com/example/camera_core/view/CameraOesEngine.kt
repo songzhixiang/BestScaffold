@@ -17,11 +17,12 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import com.example.camera_core.opengl.BitmapDrawer
-import com.example.camera_core.opengl.FboHelper
+import com.example.camera_core.opengl.FboDrawer
 import com.example.camera_core.opengl.MvpMatrixFactory
 import com.example.camera_core.opengl.OesDrawer
 import com.example.camera_core.opengl.OesRenderTransform
 import com.example.camera_core.opengl.OesSwirlEffect
+import com.example.camera_core.opengl.SharedContextEncoderRenderer
 import com.example.camera_core.opengl.Texture2dDrawer
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -84,7 +85,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
     private val oesDrawer = OesDrawer()
     private val bitmapDrawer = BitmapDrawer(context)
     private val texture2dDrawer = Texture2dDrawer()
-    private val fboHelper = FboHelper()
+    private val fboHelper = FboDrawer()
     private val transformMatrix = FloatArray(16)
     private var renderTransform = OesRenderTransform()
     private var renderMvpMatrix = MvpMatrixFactory.create(renderTransform).mvp
@@ -279,12 +280,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         texture2dDrawer.init()
         fboHelper.init(PREVIEW_WIDTH, PREVIEW_HEIGHT)
         checkGl("初始化 OES/FBO 渲染链路")
-        Log.i(
-            TAG,
-            "FBO 初始化完成：fboId=${fboHelper.fboId}, " +
-                "textureId=${fboHelper.fboTextureId}, " +
-                "size=${fboHelper.width}x${fboHelper.height}",
-        )
+
         Log.i(TAG, "EGL 初始化完成：" + version[0] + "." + version[1])
     }
 
@@ -814,13 +810,11 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
             )
             // 1. 开启混合
             GLES20.glEnable(GLES20.GL_BLEND);
-// 2. 设置标准透明混合公式（源颜色 * 源Alpha + 目标颜色 * (1 - 源Alpha)）
+            // 2. 设置标准透明混合公式（源颜色 * 源Alpha + 目标颜色 * (1 - 源Alpha)）
             GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-
-// 3. 绘制贴纸
+            // 3. 绘制贴纸
             bitmapDrawer.draw();
-
-// 4. 绘制完成后建议关闭（避免影响下一帧相机绘制）
+            // 4. 绘制完成后建议关闭（避免影响下一帧相机绘制）
             GLES20.glDisable(GLES20.GL_BLEND);
         } finally {
             fboHelper.unbind()
