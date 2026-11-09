@@ -66,12 +66,13 @@ class OesDrawer {
     private var swirlStrengthHandle = 0
     private var textureAspectRatioHandle = 0
 
-    // 铺满全屏的顶点坐标
+    // 铺满全屏的顶点坐标，使用交错数组，可以提高GPU的缓存命中率
     private val vertexData = floatArrayOf(
-        -1.0f, -1.0f,
-        1.0f, -1.0f,
-        -1.0f,  1.0f,
-        1.0f,  1.0f
+                       // 纹理坐标 (海报) —— 整体错位，实现逆时针90度
+        -1.0f, -1.0f,  0.0f, 1.0f,     // 对应顶点3(右上)：钉上海报的【左上角】
+         1.0f, -1.0f,  0.0f, 0.0f,    // 对应顶点2(左上)：钉上海报的【左下角】
+        -1.0f,  1.0f,  1.0f, 1.0f,    // 对应顶点1(右下)：钉上海报的【右上角】
+         1.0f,  1.0f,  1.0f, 0.0f,    // 对应顶点0(左下)：钉上海报的【右下角】
     )
 
 //    // 对应的纹理坐标
@@ -94,8 +95,8 @@ class OesDrawer {
 
     private val vertexBuffer: FloatBuffer = ByteBuffer.allocateDirect(vertexData.size * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer().put(vertexData).apply { position(0) }
-    private val textureBuffer: FloatBuffer = ByteBuffer.allocateDirect(textureData.size * 4)
-        .order(ByteOrder.nativeOrder()).asFloatBuffer().put(textureData).apply { position(0) }
+//    private val textureBuffer: FloatBuffer = ByteBuffer.allocateDirect(textureData.size * 4)
+//        .order(ByteOrder.nativeOrder()).asFloatBuffer().put(textureData).apply { position(0) }
 
     fun init() {
         //创建片元着色器
@@ -170,12 +171,14 @@ class OesDrawer {
 
 
         // 传入顶点数据
+        vertexBuffer.position(0)
         GLES20.glEnableVertexAttribArray(aPositionHandle)
-        GLES20.glVertexAttribPointer(aPositionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+        GLES20.glVertexAttribPointer(aPositionHandle, 2, GLES20.GL_FLOAT, false, 4*4, vertexBuffer)
 
+        vertexBuffer.position(2)
         // 传入纹理坐标数据
         GLES20.glEnableVertexAttribArray(aTexCoordHandle)
-        GLES20.glVertexAttribPointer(aTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, textureBuffer)
+        GLES20.glVertexAttribPointer(aTexCoordHandle, 2, GLES20.GL_FLOAT, false, 4*4, vertexBuffer)
 
         // MVP 改变顶点几何位置；ST 矩阵只改变 OES 纹理采样坐标。
         GLES20.glUniformMatrix4fv(uMvpMatrixHandle, 1, false, mvpMatrix, 0)
