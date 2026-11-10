@@ -2,9 +2,9 @@ package com.example.camera_core.opengl
 
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLES30
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 
 class OesDrawer {
 
@@ -54,6 +54,8 @@ class OesDrawer {
     """.trimIndent()
 
     private var program = 0
+    private var vboId = 0
+    private var vaoId = 0
     private var aPositionHandle = 0
     private var aTexCoordHandle = 0
     private var uMvpMatrixHandle = 0
@@ -66,38 +68,15 @@ class OesDrawer {
     private var swirlStrengthHandle = 0
     private var textureAspectRatioHandle = 0
 
-    // 铺满全屏的顶点坐标，使用交错数组，可以提高GPU的缓存命中率
+    // 每个顶点按 x、y、u、v 交错存放，保留相机纹理原有的 90 度旋转。
     private val vertexData = floatArrayOf(
-                       // 纹理坐标 (海报) —— 整体错位，实现逆时针90度
-        -1.0f, -1.0f,  0.0f, 1.0f,     // 对应顶点3(右上)：钉上海报的【左上角】
-         1.0f, -1.0f,  0.0f, 0.0f,    // 对应顶点2(左上)：钉上海报的【左下角】
-        -1.0f,  1.0f,  1.0f, 1.0f,    // 对应顶点1(右下)：钉上海报的【右上角】
-         1.0f,  1.0f,  1.0f, 0.0f,    // 对应顶点0(左下)：钉上海报的【右下角】
+        -1.0f, -1.0f, 0.0f, 1.0f,
+        1.0f, -1.0f, 0.0f, 0.0f,
+        -1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 0.0f,
     )
 
-//    // 对应的纹理坐标
-//    private val textureData = floatArrayOf(
-//        0.0f, 0.0f,
-//        1.0f, 0.0f,
-//        0.0f, 1.0f,
-//        1.0f, 1.0f
-//    )
-
-
-
-    // 纹理坐标 (海报) —— 整体错位，实现逆时针90度
-    private val textureData = floatArrayOf(
-        0.0f, 1.0f,     // 对应顶点3(右上)：钉上海报的【左上角】
-        0.0f, 0.0f,    // 对应顶点2(左上)：钉上海报的【左下角】
-        1.0f, 1.0f,    // 对应顶点1(右下)：钉上海报的【右上角】
-        1.0f, 0.0f,    // 对应顶点0(左下)：钉上海报的【右下角】
-    )
-
-    private val vertexBuffer: FloatBuffer = ByteBuffer.allocateDirect(vertexData.size * 4)
-        .order(ByteOrder.nativeOrder()).asFloatBuffer().put(vertexData).apply { position(0) }
-//    private val textureBuffer: FloatBuffer = ByteBuffer.allocateDirect(textureData.size * 4)
-//        .order(ByteOrder.nativeOrder()).asFloatBuffer().put(textureData).apply { position(0) }
-
+    /** 在当前 OpenGL ES 3.0 或更高版本的上下文中初始化。 */
     fun init() {
         //创建片元着色器
         val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode)
@@ -145,12 +124,55 @@ class OesDrawer {
                 swirlCenterHandle >= 0 && swirlRadiusHandle >= 0 &&
                 swirlStrengthHandle >= 0 && textureAspectRatioHandle >= 0
             ) { "OES 着色器缺少必需的 attribute 或 uniform" }
+            initVertexArray()
         } catch (error: Exception) {
             release()
             throw error
         } finally {
+            GLES20.glUseProgram(0)
             GLES20.glDeleteShader(vertexShader)
             GLES20.glDeleteShader(fragmentShader)
+        }
+    }
+
+    private fun initVertexArray() {
+        val byteCount = vertexData.size * Float.SIZE_BYTES
+        val vertexBuffer = ByteBuffer.allocateDirect(byteCount)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .put(vertexData)
+            .apply { position(0) }
+        val buffers = IntArray(1)
+        GLES20.glGenBuffers(1, buffers, 0)
+        vboId = buffers[0]
+        check(vboId != 0) { "无法创建 OES 顶点缓冲区" }
+
+        val vertexArrays = IntArray(1)
+        GLES30.glGenVertexArrays(1, vertexArrays, 0)
+        vaoId = vertexArrays[0]
+        check(vaoId != 0) { "无法创建 OES 顶点数组对象" }
+
+        GLES30.glBindVertexArray(vaoId)
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboId)
+        try {
+            GLES20.glBufferData(
+                GLES20.GL_ARRAY_BUFFER, byteCount, vertexBuffer, GLES20.GL_STATIC_DRAW,
+            )
+
+            val strideBytes = 4 * Float.SIZE_BYTES
+            val uvOffsetBytes = 2 * Float.SIZE_BYTES
+            GLES20.glEnableVertexAttribArray(aPositionHandle)
+            GLES20.glVertexAttribPointer(
+                aPositionHandle, 2, GLES20.GL_FLOAT, false, strideBytes, 0,
+            )
+            GLES20.glEnableVertexAttribArray(aTexCoordHandle)
+            GLES20.glVertexAttribPointer(
+                aTexCoordHandle, 2, GLES20.GL_FLOAT, false, strideBytes, uvOffsetBytes,
+            )
+            checkGl("初始化 OES VAO/VBO")
+        } finally {
+            GLES30.glBindVertexArray(0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         }
     }
 
@@ -170,16 +192,6 @@ class OesDrawer {
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
 
 
-        // 传入顶点数据
-        vertexBuffer.position(0)
-        GLES20.glEnableVertexAttribArray(aPositionHandle)
-        GLES20.glVertexAttribPointer(aPositionHandle, 2, GLES20.GL_FLOAT, false, 4*4, vertexBuffer)
-
-        vertexBuffer.position(2)
-        // 传入纹理坐标数据
-        GLES20.glEnableVertexAttribArray(aTexCoordHandle)
-        GLES20.glVertexAttribPointer(aTexCoordHandle, 2, GLES20.GL_FLOAT, false, 4*4, vertexBuffer)
-
         // MVP 改变顶点几何位置；ST 矩阵只改变 OES 纹理采样坐标。
         GLES20.glUniformMatrix4fv(uMvpMatrixHandle, 1, false, mvpMatrix, 0)
         GLES20.glUniformMatrix4fv(uSTMatrixHandle, 1, false, textureMatrix, 0)
@@ -196,28 +208,38 @@ class OesDrawer {
         GLES20.glUniform1f(swirlStrengthHandle, swirlEffect.strengthRadians)
         GLES20.glUniform1f(textureAspectRatioHandle, swirlEffect.textureAspectRatio)
 
-        // 绘制
+        GLES30.glBindVertexArray(vaoId)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glBindVertexArray(0)
 
-        // 禁用顶点属性
-        GLES20.glDisableVertexAttribArray(aPositionHandle)
-        GLES20.glDisableVertexAttribArray(aTexCoordHandle)
         // 解绑纹理
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
         // 关闭程序
         GLES20.glUseProgram(0)
 
-        val error = GLES20.glGetError()
-        check(error == GLES20.GL_NO_ERROR) {
-            "OES 绘制失败：GL error=0x${error.toString(16)}"
-        }
+        checkGl("OES 绘制")
     }
 
-    /** 必须在创建此程序的 GL 上下文仍有效时调用。 */
+    /** 必须在创建这些资源的 GL 上下文处于当前状态时调用。 */
     fun release() {
+        if (vaoId != 0) {
+            GLES30.glDeleteVertexArrays(1, intArrayOf(vaoId), 0)
+            vaoId = 0
+        }
+        if (vboId != 0) {
+            GLES20.glDeleteBuffers(1, intArrayOf(vboId), 0)
+            vboId = 0
+        }
         if (program != 0) {
             GLES20.glDeleteProgram(program)
             program = 0
+        }
+    }
+
+    private fun checkGl(operation: String) {
+        val error = GLES20.glGetError()
+        check(error == GLES20.GL_NO_ERROR) {
+            "$operation 失败：GL error=0x${error.toString(16)}"
         }
     }
 

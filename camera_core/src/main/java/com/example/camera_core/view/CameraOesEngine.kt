@@ -237,7 +237,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         // 同一个配置必须同时支持后台 Pbuffer 与前台 Window Surface。
         val configAttribs = intArrayOf(
             EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
             EGL_RECORDABLE_ANDROID, 1,
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
@@ -257,11 +257,11 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         val config = requireNotNull(configs[0])
         eglConfig = config
 
-        val contextAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
+        val contextAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE)
         eglContext = EGL14.eglCreateContext(
             eglDisplay, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0,
         )
-        checkEgl(eglContext != EGL14.EGL_NO_CONTEXT, "eglCreateContext")
+        checkEgl(eglContext != EGL14.EGL_NO_CONTEXT, "eglCreateContext(ES 3.0)")
 
         val pbufferAttribs = intArrayOf(
             EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE,
@@ -281,7 +281,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         fboHelper.init(PREVIEW_WIDTH, PREVIEW_HEIGHT)
         checkGl("初始化 OES/FBO 渲染链路")
 
-        Log.i(TAG, "EGL 初始化完成：" + version[0] + "." + version[1])
+        Log.i(TAG, "EGL 初始化完成：${version[0]}.${version[1]}，OpenGL ES 3.0")
     }
 
     private fun createOesTextureAndSurface() {
