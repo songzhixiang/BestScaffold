@@ -10,9 +10,10 @@ import java.nio.FloatBuffer
 class Texture2dDrawer {
 
     private val vertexShaderCode = """
-        attribute vec4 aPosition;
-        attribute vec2 aTexCoord;
-        varying vec2 vTexCoord;
+        #version 300 es
+        in vec4 aPosition;
+        in vec2 aTexCoord;
+        out vec2 vTexCoord;
         void main() {
             gl_Position = aPosition;
             vTexCoord = aTexCoord;
@@ -20,11 +21,13 @@ class Texture2dDrawer {
     """.trimIndent()
 
     private val fragmentShaderCode = """
+        #version 300 es
         precision mediump float;
-        varying vec2 vTexCoord;
+        in vec2 vTexCoord;
         uniform sampler2D uTexture;
+        layout(location = 0) out vec4 fragColor;
         void main() {
-            gl_FragColor = texture2D(uTexture, vTexCoord);
+            fragColor = texture(uTexture, vTexCoord);
         }
     """.trimIndent()
 

@@ -2,6 +2,8 @@ package com.example.camera_core.view
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraDevice
@@ -16,14 +18,15 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.view.Surface
-import com.example.camera_core.opengl.BitmapDrawer
-import com.example.camera_core.opengl.FboDrawer
+import com.example.camera_core.R
 import com.example.camera_core.opengl.MvpMatrixFactory
-import com.example.camera_core.opengl.OesDrawer
 import com.example.camera_core.opengl.OesRenderTransform
 import com.example.camera_core.opengl.OesSwirlEffect
 import com.example.camera_core.opengl.SharedContextEncoderRenderer
-import com.example.camera_core.opengl.Texture2dDrawer
+import com.example.native_opengl_core.NativeBitmapDrawer
+import com.example.native_opengl_core.NativeFboDrawer
+import com.example.native_opengl_core.NativeOesDrawer
+import com.example.native_opengl_core.NativeTexture2dDrawer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -82,10 +85,10 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
     private var oesTextureId = 0
     private var surfaceTexture: SurfaceTexture? = null
     private var cameraInputSurface: Surface? = null
-    private val oesDrawer = OesDrawer()
-    private val bitmapDrawer = BitmapDrawer(context)
-    private val texture2dDrawer = Texture2dDrawer()
-    private val fboHelper = FboDrawer()
+    private val oesDrawer = NativeOesDrawer()
+    private val bitmapDrawer = NativeBitmapDrawer()
+    private val texture2dDrawer = NativeTexture2dDrawer()
+    private val fboHelper = NativeFboDrawer()
     private val transformMatrix = FloatArray(16)
     private var renderTransform = OesRenderTransform()
     private var renderMvpMatrix = MvpMatrixFactory.create(renderTransform).mvp
@@ -276,7 +279,18 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
         )
 
         oesDrawer.init()
-        bitmapDrawer.init()
+        val stickerOptions = BitmapFactory.Options().apply {
+            inScaled = false
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val sticker = checkNotNull(
+            BitmapFactory.decodeResource(applicationContext.resources, R.drawable.sample_image, stickerOptions),
+        ) { "无法解码贴纸" }
+        try {
+            bitmapDrawer.init(sticker)
+        } finally {
+            sticker.recycle()
+        }
         texture2dDrawer.init()
         fboHelper.init(PREVIEW_WIDTH, PREVIEW_HEIGHT)
         checkGl("初始化 OES/FBO 渲染链路")
@@ -602,12 +616,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
                             eglDisplay, previewEglSurface, previewEglSurface, eglContext),
                         "eglMakeCurrent(预览窗口)",
                     )
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-                    GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight)
-                    GLES20.glClearColor(0f, 0f, 0f, 1f)
-                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                    // Pass 2：FBO 的普通 2D 纹理 -> 预览窗口默认 framebuffer。
-                    texture2dDrawer.draw(fboHelper.fboTextureId)
+                    drawOutput(surfaceWidth, surfaceHeight)
                     checkEgl(EGL14.eglSwapBuffers(eglDisplay, previewEglSurface), "eglSwapBuffers")
                 } catch (error: Exception) {
                     previewError = error
@@ -691,9 +700,10 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
                 }
             }
 
-            cleanupStep("释放 FBO") { fboHelper.release() }
-            cleanupStep("释放 2D 纹理着色器") { texture2dDrawer.release() }
-            cleanupStep("释放 OES 着色器") { oesDrawer.release() }
+            cleanupStep("释放 Native FBO") { fboHelper.release() }
+            cleanupStep("释放 Native 2D 绘制器") { texture2dDrawer.release() }
+            cleanupStep("释放 Native 贴纸绘制器") { bitmapDrawer.release() }
+            cleanupStep("释放 Native OES 绘制器") { oesDrawer.release() }
             if (oesTextureId != 0) {
                 cleanupStep("删除 OES 纹理") {
                     GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
@@ -771,12 +781,7 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
                 ),
                 "eglMakeCurrent(编码器窗口)",
             )
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-            GLES20.glViewport(0, 0, encoderWidth, encoderHeight)
-            GLES20.glClearColor(0f, 0f, 0f, 1f)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            // Pass 2：同一张 FBO 纹理也可以直接送入编码器 Surface。
-            texture2dDrawer.draw(fboHelper.fboTextureId)
+            drawOutput(encoderWidth, encoderHeight)
             EGLExt.eglPresentationTimeANDROID(
                 eglDisplay,
                 encoderEglSurface,
@@ -802,24 +807,27 @@ class CameraOesEngine(context: Context) : SurfaceTexture.OnFrameAvailableListene
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             oesDrawer.draw(
-                oesTextureId,
-                transformMatrix,
-                userTextureMatrix,
-                renderMvpMatrix,
-                swirlEffect,
+                oesTextureId, transformMatrix, userTextureMatrix, renderMvpMatrix,
+                swirlEffect.enabled, swirlEffect.centerX, swirlEffect.centerY, swirlEffect.radius,
+                swirlEffect.strengthRadians, swirlEffect.textureAspectRatio,
             )
-            // 1. 开启混合
-            GLES20.glEnable(GLES20.GL_BLEND);
-            // 2. 设置标准透明混合公式（源颜色 * 源Alpha + 目标颜色 * (1 - 源Alpha)）
-            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-            // 3. 绘制贴纸
-            bitmapDrawer.draw();
-            // 4. 绘制完成后建议关闭（避免影响下一帧相机绘制）
-            GLES20.glDisable(GLES20.GL_BLEND);
+
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            bitmapDrawer.draw()
         } finally {
+            GLES20.glDisable(GLES20.GL_BLEND)
             fboHelper.unbind()
         }
         checkGl("OES 纹理写入 FBO")
+    }
+
+    private fun drawOutput(width: Int, height: Int) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, width, height)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        texture2dDrawer.draw(fboHelper.fboTextureId)
     }
 
     private fun nextEncoderPresentationTimeNs(sourceTimestampNs: Long): Long {

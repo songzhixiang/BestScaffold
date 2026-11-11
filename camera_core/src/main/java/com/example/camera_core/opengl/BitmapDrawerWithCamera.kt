@@ -13,9 +13,10 @@ class BitmapDrawerWithCamera (var context: Context){
 
     //创建着色器代码
     private val vertexShaderCode = """
-        attribute vec4 aPosition;
-        attribute vec2 aTexCoord;
-        varying vec2 vTexCoord;
+        #version 300 es
+        in vec4 aPosition;
+        in vec2 aTexCoord;
+        out vec2 vTexCoord;
         void main() {
             vTexCoord = aTexCoord;
             gl_Position = aPosition;
@@ -23,12 +24,14 @@ class BitmapDrawerWithCamera (var context: Context){
     """.trimIndent()
 
     private val fragmentShaderCode = """
+        #version 300 es
         precision mediump float;
-        varying vec2 vTexCoord;
+        in vec2 vTexCoord;
         uniform sampler2D uTexture;
+        layout(location = 0) out vec4 fragColor;
         void main() {
             vec2 flippedCoord = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
-            gl_FragColor = texture2D(uTexture, flippedCoord);
+            fragColor = texture(uTexture, flippedCoord);
         }
     """.trimIndent()
 

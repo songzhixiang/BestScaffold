@@ -10,12 +10,13 @@ class OesDrawer {
 
     // 顶点着色器：处理位置和矩阵变换
     private val vertexShaderCode = """
-        attribute vec4 aPosition;
-        attribute vec4 aTexCoord;
+        #version 300 es
+        in vec4 aPosition;
+        in vec4 aTexCoord;
         uniform mat4 uMvpMatrix;
         uniform mat4 uSTMatrix;
         uniform mat4 uUserTextureMatrix;
-        varying vec2 vTexCoord;
+        out vec2 vTexCoord;
         void main() {
             gl_Position = uMvpMatrix * aPosition;
             vTexCoord = (uSTMatrix * uUserTextureMatrix * aTexCoord).xy;
@@ -24,10 +25,12 @@ class OesDrawer {
 
     // 片段着色器：采样 OES 纹理并输出颜色 (核心宏定义不可少)
     private val fragmentShaderCode = """
-        #extension GL_OES_EGL_image_external : require
+        #version 300 es
+        #extension GL_OES_EGL_image_external_essl3 : require
         precision mediump float;
-        varying vec2 vTexCoord;
-        uniform samplerExternalOES sTexture; //sTexture 是采样器，不是纹理 ID
+        in vec2 vTexCoord;
+        uniform samplerExternalOES sTexture;
+        layout(location = 0) out vec4 fragColor;
         uniform float uSwirlEnabled;
         uniform vec2 uSwirlCenter;
         uniform float uSwirlRadius;
@@ -49,7 +52,7 @@ class OesDrawer {
                     sampleCoordinate = uSwirlCenter + delta;
                 }
             }
-            gl_FragColor = texture2D(sTexture, clamp(sampleCoordinate, 0.0, 1.0)); //实际上是在对 GPU 说：“请去 sTexture 指定的 0 号卡槽，按照插值得到的 vTexCoord 坐标，把那里的像素颜色捞出来”。
+            fragColor = texture(sTexture, clamp(sampleCoordinate, 0.0, 1.0));
         }
     """.trimIndent()
 
